@@ -1,10 +1,16 @@
 pipeline {
   agent any
 
+  options {
+    timeout(time: 30, unit: 'MINUTES')
+    timestamps()
+  }
+
   parameters {
     string(name: 'REGISTRY', defaultValue: 'registry.example.com', description: 'Container registry hostname')
     string(name: 'IMAGE_REPOSITORY', defaultValue: 'gst-billing', description: 'Repository name in the registry')
     string(name: 'KUBECONFIG_CREDENTIALS_ID', defaultValue: 'kubeconfig-gst-billing', description: 'Jenkins file credential containing kubeconfig')
+    string(name: 'APP_DIR', defaultValue: '2026-08-03/sanjaybdch9-gst-billing-python-django-git/outputs/gst-billing-devops', description: 'Path to the app (Dockerfile + k8s/) within the repo. Set to "." if the app is at the repo root.')
   }
 
   environment {
@@ -15,47 +21,79 @@ pipeline {
   stages {
     stage('Test') {
       steps {
-        sh '''
-          docker build -t "$IMAGE:test" .
-          docker run --rm \
-            -e DJANGO_SECRET_KEY=ci-only-not-for-runtime \
-            -e POSTGRES_PASSWORD=ci-only \
-            -e DJANGO_ALLOWED_HOSTS=localhost \
-            "$IMAGE:test" python manage.py check
-        '''
+        dir("${params.APP_DIR}") {
+          sh '''
+            docker build -t "$IMAGE:test" .
+            docker run --rm \
+              -e DJANGO_SECRET_KEY=ci-only-not-for-runtime \
+              -e POSTGRES_PASSWORD=ci-only \
+              -e DJANGO_ALLOWED_HOSTS=localhost \
+              "$IMAGE:test" python manage.py check
+            docker rmi "$IMAGE:test" || true
+          '''
+        }
       }
     }
+
     stage('Build and push') {
       steps {
         script {
           env.IMAGE_TAG = sh(script: 'git rev-parse --short=12 HEAD', returnStdout: true).trim()
         }
-        withCredentials([usernamePassword(credentialsId: 'container-registry', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASSWORD')]) {
-          sh '''
-            echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
-            docker build -t "$IMAGE:$IMAGE_TAG" -t "$IMAGE:latest" .
-            docker push "$IMAGE:$IMAGE_TAG"
-            docker push "$IMAGE:latest"
-            docker logout "$REGISTRY"
-          '''
+        dir("${params.APP_DIR}") {
+          withCredentials([usernamePassword(credentialsId: 'container-registry', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASSWORD')]) {
+            sh '''
+              set +x
+              echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+              set -x
+              docker build -t "$IMAGE:$IMAGE_TAG" -t "$IMAGE:latest" .
+              docker push "$IMAGE:$IMAGE_TAG"
+              docker push "$IMAGE:latest"
+              docker logout "$REGISTRY"
+            '''
+          }
         }
       }
     }
+
     stage('Deploy to Kubernetes') {
       steps {
-        withCredentials([file(credentialsId: "${params.KUBECONFIG_CREDENTIALS_ID}", variable: 'KUBECONFIG')]) {
-          sh '''
-            kubectl apply -f k8s/namespace.yaml
-            kubectl apply -f k8s/configmap.yaml
-            kubectl apply -f k8s/postgres.yaml
-            kubectl -n "$KUBE_NAMESPACE" wait --for=condition=ready pod -l app=postgres --timeout=180s
-            kubectl -n "$KUBE_NAMESPACE" delete job gst-billing-migrate --ignore-not-found=true
-            sed "s#registry.example.com/gst-billing:latest#$IMAGE:$IMAGE_TAG#g" k8s/migration-job.yaml | kubectl apply -f -
-            kubectl -n "$KUBE_NAMESPACE" wait --for=condition=complete job/gst-billing-migrate --timeout=300s
-            sed "s#registry.example.com/gst-billing:latest#$IMAGE:$IMAGE_TAG#g" k8s/app.yaml | kubectl apply -f -
-            kubectl -n "$KUBE_NAMESPACE" rollout status deployment/gst-billing --timeout=300s
-            kubectl apply -f k8s/ingress.yaml
-          '''
+        dir("${params.APP_DIR}") {
+          withCredentials([file(credentialsId: "${params.KUBECONFIG_CREDENTIALS_ID}", variable: 'KUBECONFIG')]) {
+            sh '''
+              kubectl apply -f k8s/namespace.yaml
+
+              # Create the app secret only on the first deploy; keep it thereafter so
+              # the Postgres password stays consistent with its existing data volume.
+              # set +x prevents the generated secret values from leaking into the build log.
+              set +x
+              if ! kubectl -n "$KUBE_NAMESPACE" get secret gst-billing-secrets >/dev/null 2>&1; then
+                echo "gst-billing-secrets not found — generating it (first deploy)."
+                DJANGO_SECRET_KEY_VALUE="$(head -c 48 /dev/urandom | base64 | tr -d '\\n')"
+                POSTGRES_PASSWORD_VALUE="$(head -c 24 /dev/urandom | base64 | tr -d '/+=\\n')"
+                kubectl -n "$KUBE_NAMESPACE" create secret generic gst-billing-secrets \
+                  --from-literal=DJANGO_SECRET_KEY="$DJANGO_SECRET_KEY_VALUE" \
+                  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD_VALUE"
+                unset DJANGO_SECRET_KEY_VALUE POSTGRES_PASSWORD_VALUE
+              else
+                echo "gst-billing-secrets already exists — reusing it."
+              fi
+              set -x
+
+              kubectl apply -f k8s/configmap.yaml
+              kubectl apply -f k8s/postgres.yaml
+              kubectl -n "$KUBE_NAMESPACE" rollout status statefulset/postgres --timeout=180s
+
+              kubectl -n "$KUBE_NAMESPACE" delete job gst-billing-migrate --ignore-not-found=true
+              sed "s#registry.example.com/gst-billing:latest#$IMAGE:$IMAGE_TAG#g" k8s/migration-job.yaml | kubectl apply -f -
+              kubectl -n "$KUBE_NAMESPACE" wait --for=condition=complete job/gst-billing-migrate --timeout=300s
+
+              sed "s#registry.example.com/gst-billing:latest#$IMAGE:$IMAGE_TAG#g" k8s/app.yaml | kubectl apply -f -
+              kubectl -n "$KUBE_NAMESPACE" rollout status deployment/gst-billing --timeout=300s
+
+              kubectl apply -f k8s/ingress.yaml
+            '''
+          }
         }
       }
     }
