@@ -1,1 +1,6 @@
+# macOS
 .DS_Store
+
+# Excluded: work/app is a separate git repository
+# (github.com/sanjaybdch9/Gst-Billing-Python-Django) and is not part of this repo.
+/2026-08-03/sanjaybdch9-gst-billing-python-django-git/work/app/
