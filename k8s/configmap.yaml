@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gst-billing-config
+  namespace: gst-billing
+data:
+  DJANGO_DEBUG: "false"
+  DJANGO_ALLOWED_HOSTS: "gst-billing.example.com"
+  DJANGO_TIME_ZONE: "Asia/Kolkata"
+  DJANGO_SECURE_COOKIES: "true"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "gstbilling"
+  POSTGRES_USER: "gstbilling"

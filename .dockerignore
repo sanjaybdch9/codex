@@ -1,0 +1,11 @@
+.git
+.venv
+venv
+__pycache__
+*.py[cod]
+*.sqlite3
+gstbillingdb.sqlite3
+rece.pdf
+work
+outputs
+*.md
