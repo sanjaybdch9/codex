@@ -65,6 +65,12 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
+# Use this app's own login page (gstbillingapp/login.html, served at /login).
+# Without this, @login_required falls back to Django's /accounts/login/, whose
+# registration/login.html template does not exist here, causing a 500.
+LOGIN_URL = "login_view"
+LOGIN_REDIRECT_URL = "invoice_create"
+
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = os.environ.get("DJANGO_TIME_ZONE", "Asia/Kolkata")
 USE_I18N = True
